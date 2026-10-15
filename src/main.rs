@@ -1,7 +1,7 @@
 use std::{path::PathBuf, thread, time::Duration};
 
 use clap::Parser;
-use fstrace::{Event, diff, snapshot};
+use fstrace::{Event, diff, snapshot, snapshot_hashed};
 
 /// Mirror a live tree elsewhere: poll the source, copy what changed.
 #[derive(Parser, Debug)]
@@ -20,6 +20,12 @@ struct Args {
     /// Mirror deletions too. Without this, the dest only ever gains files.
     #[arg(long)]
     delete: bool,
+    /// Skip content fingerprinting. Hashed snapshots are the default
+    /// because a mirror that silently misses rewrites is worse than none;
+    /// skip only for giant trees where re-reading every file every poll
+    /// costs more than the misses it prevents.
+    #[arg(long)]
+    no_hash: bool,
 }
 
 fn main() {
@@ -37,10 +43,17 @@ fn main() {
         std::process::exit(1);
     }
 
-    let mut prev = snapshot(&args.source, &args.excludes);
+    // Hashed snapshots by default: plain metadata misses same-stamp
+    // same-size rewrites, and a mirror must not silently skip writes.
+    let capture = if args.no_hash {
+        snapshot
+    } else {
+        snapshot_hashed
+    };
+    let mut prev = capture(&args.source, &args.excludes);
     loop {
         thread::sleep(Duration::from_millis(args.interval));
-        let curr = snapshot(&args.source, &args.excludes);
+        let curr = capture(&args.source, &args.excludes);
         for event in diff(&prev, &curr) {
             apply(&args, &event);
         }
