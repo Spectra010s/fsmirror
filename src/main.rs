@@ -22,7 +22,7 @@ struct Args {
     /// File or directory to watch.
     source: PathBuf,
     /// Mirror target: directory for directory sources; directory or file
-    /// path for file sources (existing directory wins, like `cp`).
+    // path for file sources (existing directory wins, like `cp`).
     dest: PathBuf,
     /// Exclude a file or folder (repeatable, `*`/`?` patterns allowed).
     #[arg(long = "exclude")]
@@ -33,14 +33,16 @@ struct Args {
     /// Mirror deletions too. Without this, the dest only ever gains files.
     #[arg(long)]
     delete: bool,
-    /// Skip content fingerprinting. Hashed snapshots are the default
-    /// because a mirror that silently misses rewrites is worse than none;
-    /// skip only for giant trees where re-reading every file every poll
-    /// costs more than the misses it prevents.
+    /// Skip content fingerprinting.
+    // Hashed snapshots are the default because a mirror that silently
+    // misses rewrites is worse than none; skip only for giant trees
+    // where re-reading every file every poll costs more than the
+    // misses it prevents.
     #[arg(long)]
     no_hash: bool,
-    /// Sync once and exit. For scripts and cron: populate the dest from
-    /// current state, then leave instead of watching.
+    /// Sync once and exit.
+    // For scripts and cron: populate the dest from current state,
+    // then leave instead of watching.
     #[arg(long)]
     once: bool,
 }
