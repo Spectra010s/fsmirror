@@ -40,7 +40,7 @@ struct Args {
     // misses it prevents.
     #[arg(long)]
     no_hash: bool,
-    /// Sync once and exit.
+    /// Mirror once and exit.
     // For scripts and cron: populate the dest from current state,
     // then leave instead of watching.
     #[arg(long)]
@@ -109,7 +109,7 @@ fn mirror_file(args: &Args) {
         hash: if !args.no_hash { fhash(&dst) } else { None },
     };
     let mut prev = state(!args.no_hash);
-    // Startup sync, same as tree mode: copy when missing or differing.
+    // Startup mirror, same as tree mode: copy when missing or differing.
     if args.source.exists() && dst_state() != prev {
         let _ = fs::copy(&args.source, &dst);
     }
@@ -151,12 +151,12 @@ fn mirror_tree(args: &Args) {
     } else {
         snapshot_hashed
     };
-    // Startup sync: the watch loop only sees changes *after* it starts,
+    // Startup mirror: the watch loop only sees changes *after* it starts,
     // so populate the dest first or pre-existing files never arrive.
     // Copies missing or differing files; never deletes (even with
     // --delete: wiping a non-empty dest on first run would be destructive,
     // deletions flow only through the live loop).
-    initial_sync(args, capture);
+    initial_mirror(args, capture);
     if args.once {
         return;
     }
@@ -174,7 +174,10 @@ fn mirror_tree(args: &Args) {
 // Bring dest up to date before the watch loop starts: copy every source
 // file missing in dest or differing from it. Same-State comparison as
 // the live loop, so no second opinion logic to drift.
-fn initial_sync(args: &Args, capture: fn(&Path, &[String]) -> HashMap<String, fstrace::FileState>) {
+fn initial_mirror(
+    args: &Args,
+    capture: fn(&Path, &[String]) -> HashMap<String, fstrace::FileState>,
+) {
     let src_map = capture(&args.source, &args.excludes);
     let dst_map = capture(&args.dest, &args.excludes);
     let mut copied = 0u32;
@@ -196,7 +199,7 @@ fn initial_sync(args: &Args, capture: fn(&Path, &[String]) -> HashMap<String, fs
         }
     }
     if copied > 0 {
-        eprintln!("initial sync: {copied} file(s)");
+        eprintln!("mirrored: {copied} file(s)");
     }
 }
 
