@@ -1,8 +1,15 @@
-use std::{path::PathBuf, thread, time::Duration};
-
-use clap::Parser;
-use fstrace::{
-    Event, FileState, diff, fhash, fsize, matches_exclude, mtime, snapshot, snapshot_hashed,
+use {
+    clap::Parser,
+    fstrace::{
+        Event, FileState, diff, fhash, fsize, matches_exclude, mtime, snapshot, snapshot_hashed,
+    },
+    std::{
+        collections::HashMap,
+        fs,
+        path::{Path, PathBuf},
+        process, thread,
+        time::Duration,
+    },
 };
 
 /// Mirror a live tree elsewhere: poll the source, copy what changed.
@@ -50,7 +57,7 @@ fn main() {
             "error: source is not a file or directory: {}",
             args.source.display()
         );
-        std::process::exit(1);
+        process::exit(1);
     }
     mirror_tree(&args);
 }
@@ -73,7 +80,7 @@ fn mirror_file(args: &Args) {
             "error: source excluded by --exclude: {}",
             args.source.display()
         );
-        std::process::exit(1);
+        process::exit(1);
     }
 
     // cp rule: existing directory wins, otherwise dest is the file path.
@@ -83,10 +90,10 @@ fn mirror_file(args: &Args) {
         args.dest.clone()
     };
     if let Some(parent) = dst.parent()
-        && let Err(e) = std::fs::create_dir_all(parent)
+        && let Err(e) = fs::create_dir_all(parent)
     {
         eprintln!("error: cannot create dest {}: {e}", parent.display());
-        std::process::exit(1);
+        process::exit(1);
     }
 
     let state = |hash: bool| FileState {
@@ -102,7 +109,7 @@ fn mirror_file(args: &Args) {
     let mut prev = state(!args.no_hash);
     // Startup sync, same as tree mode: copy when missing or differing.
     if args.source.exists() && dst_state() != prev {
-        let _ = std::fs::copy(&args.source, &dst);
+        let _ = fs::copy(&args.source, &dst);
     }
     if args.once {
         return;
@@ -111,7 +118,7 @@ fn mirror_file(args: &Args) {
         thread::sleep(Duration::from_millis(args.interval));
         if !args.source.exists() {
             if args.delete {
-                let _ = std::fs::remove_file(&dst);
+                let _ = fs::remove_file(&dst);
             }
             prev = state(!args.no_hash);
             continue;
@@ -119,9 +126,9 @@ fn mirror_file(args: &Args) {
         let curr = state(!args.no_hash);
         if curr != prev {
             if let Some(parent) = dst.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                let _ = fs::create_dir_all(parent);
             }
-            if let Err(e) = std::fs::copy(&args.source, &dst) {
+            if let Err(e) = fs::copy(&args.source, &dst) {
                 eprintln!("error: copy {}: {e}", args.source.display());
             }
             prev = curr;
@@ -130,9 +137,9 @@ fn mirror_file(args: &Args) {
 }
 
 fn mirror_tree(args: &Args) {
-    if let Err(e) = std::fs::create_dir_all(&args.dest) {
+    if let Err(e) = fs::create_dir_all(&args.dest) {
         eprintln!("error: cannot create dest {}: {e}", args.dest.display());
-        std::process::exit(1);
+        process::exit(1);
     }
 
     // Hashed snapshots by default: plain metadata misses same-stamp
@@ -165,13 +172,7 @@ fn mirror_tree(args: &Args) {
 // Bring dest up to date before the watch loop starts: copy every source
 // file missing in dest or differing from it. Same-State comparison as
 // the live loop, so no second opinion logic to drift.
-fn initial_sync(
-    args: &Args,
-    capture: fn(
-        &std::path::Path,
-        &[String],
-    ) -> std::collections::HashMap<String, fstrace::FileState>,
-) {
+fn initial_sync(args: &Args, capture: fn(&Path, &[String]) -> HashMap<String, fstrace::FileState>) {
     let src_map = capture(&args.source, &args.excludes);
     let dst_map = capture(&args.dest, &args.excludes);
     let mut copied = 0u32;
@@ -185,9 +186,9 @@ fn initial_sync(
         if dst_map.get(&dst_key) != Some(state) {
             let dst = args.dest.join(&rel);
             if let Some(parent) = dst.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                let _ = fs::create_dir_all(parent);
             }
-            if std::fs::copy(path, &dst).is_ok() {
+            if fs::copy(path, &dst).is_ok() {
                 copied += 1;
             }
         }
@@ -213,9 +214,9 @@ fn apply(args: &Args, event: &Event) {
     match event {
         Event::Created { .. } | Event::Modified { .. } => {
             if let Some(parent) = dst.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                let _ = fs::create_dir_all(parent);
             }
-            if let Err(e) = std::fs::copy(&src, &dst) {
+            if let Err(e) = fs::copy(&src, &dst) {
                 eprintln!("error: copy {}: {e}", src.display());
             }
         }
@@ -223,7 +224,7 @@ fn apply(args: &Args, event: &Event) {
             // Append-only unless --delete: the dest never loses files
             // by default, so a bad poll cannot wipe the backup.
             if args.delete {
-                let _ = std::fs::remove_file(&dst);
+                let _ = fs::remove_file(&dst);
             }
         }
     }
