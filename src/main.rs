@@ -50,6 +50,12 @@ fn main() {
     } else {
         snapshot_hashed
     };
+    // Startup sync: the watch loop only sees changes *after* it starts,
+    // so populate the dest first or pre-existing files never arrive.
+    // Copies missing or differing files; never deletes (even with
+    // --delete: wiping a non-empty dest on first run would be destructive,
+    // deletions flow only through the live loop).
+    initial_sync(&args, capture);
     let mut prev = capture(&args.source, &args.excludes);
     loop {
         thread::sleep(Duration::from_millis(args.interval));
@@ -58,6 +64,41 @@ fn main() {
             apply(&args, &event);
         }
         prev = curr;
+    }
+}
+
+// Bring dest up to date before the watch loop starts: copy every source
+// file missing in dest or differing from it. Same-State comparison as
+// the live loop, so no second opinion logic to drift.
+fn initial_sync(
+    args: &Args,
+    capture: fn(
+        &std::path::Path,
+        &[String],
+    ) -> std::collections::HashMap<String, fstrace::FileState>,
+) {
+    let src_map = capture(&args.source, &args.excludes);
+    let dst_map = capture(&args.dest, &args.excludes);
+    let mut copied = 0u32;
+    for (path, state) in &src_map {
+        let rel = match PathBuf::from(path).strip_prefix(&args.source) {
+            Ok(r) => r.to_path_buf(),
+            Err(_) => continue,
+        };
+        // Dest keys are absolute too; rebuild the dest-side key the same way.
+        let dst_key = args.dest.join(&rel).to_string_lossy().into_owned();
+        if dst_map.get(&dst_key) != Some(state) {
+            let dst = args.dest.join(&rel);
+            if let Some(parent) = dst.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if std::fs::copy(path, &dst).is_ok() {
+                copied += 1;
+            }
+        }
+    }
+    if copied > 0 {
+        eprintln!("initial sync: {copied} file(s)");
     }
 }
 
