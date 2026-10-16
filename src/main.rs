@@ -5,7 +5,7 @@ use {
     },
     std::{
         collections::HashMap,
-        fs,
+        env, fs,
         path::{Path, PathBuf},
         process, thread,
         time::Duration,
@@ -49,6 +49,13 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
+
+    // Refuse self-mirroring: copying a file onto itself truncates it,
+    // and a dest inside the source grows the tree every poll, forever.
+    if let Err(e) = guard_paths(&args.source, &args.dest) {
+        eprintln!("error: {e}");
+        process::exit(1);
+    }
 
     if args.source.is_file() {
         mirror_file(&args);
@@ -171,6 +178,47 @@ fn mirror_tree(args: &Args) {
     }
 }
 
+// Refuse self-mirroring before anything else. Resolves the effective
+// dest the same cp rule the modes use, then compares canonical paths
+// (lexical fallback when paths don't exist yet).
+fn guard_paths(source: &Path, dest: &Path) -> Result<(), String> {
+    // Effective dest: for file sources an existing directory wins (cp
+    // rule); directory sources mirror the dir itself, never joined.
+    let eff = if !source.is_dir() && dest.is_dir() {
+        match source.file_name() {
+            Some(name) => dest.join(name),
+            None => dest.to_path_buf(),
+        }
+    } else {
+        dest.to_path_buf()
+    };
+    let abs = |p: &Path| {
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(p)
+        }
+    };
+    let (src_abs, dst_abs) = (abs(source), abs(&eff));
+    // Canonical when possible: kills `..`, symlinks, and `./` disguises.
+    let src_can = fs::canonicalize(&src_abs).unwrap_or(src_abs);
+    let dst_can = fs::canonicalize(&dst_abs).unwrap_or(dst_abs);
+    if src_can == dst_can {
+        return Err(format!(
+            "source and dest resolve to the same path: {}",
+            dst_can.display()
+        ));
+    }
+    if dst_can.starts_with(&src_can) {
+        return Err(format!(
+            "dest lives inside the source and would mirror itself forever: {}",
+            dst_can.display()
+        ));
+    }
+    Ok(())
+}
 // Bring dest up to date before the watch loop starts: copy every source
 // file missing in dest or differing from it. Same-State comparison as
 // the live loop, so no second opinion logic to drift.
