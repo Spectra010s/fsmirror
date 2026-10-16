@@ -2,6 +2,7 @@
 name = "fsmirror"
 version = "0.1.0"
 edition = "2024"
+description = "A command-line utility for mirroring files and folders."
 license = "MIT"
 readme = "README.md"
 

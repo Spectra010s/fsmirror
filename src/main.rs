@@ -5,7 +5,7 @@ use fstrace::{Event, diff, snapshot, snapshot_hashed};
 
 /// Mirror a live tree elsewhere: poll the source, copy what changed.
 #[derive(Parser, Debug)]
-#[command(name = "fsmirror", about = "Mirror a live tree, source-only.")]
+#[command(name = "fsmirror", about = "A command-line utility for mirroring files and folders.")]
 struct Args {
     /// File or directory to watch.
     source: PathBuf,
