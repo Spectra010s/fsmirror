@@ -5,7 +5,10 @@ use fstrace::{Event, diff, snapshot, snapshot_hashed};
 
 /// Mirror a live tree elsewhere: poll the source, copy what changed.
 #[derive(Parser, Debug)]
-#[command(name = "fsmirror", about = "A command-line utility for mirroring files and folders.")]
+#[command(
+    name = "fsmirror",
+    about = "A command-line utility for mirroring files and folders."
+)]
 struct Args {
     /// File or directory to watch.
     source: PathBuf,
@@ -27,6 +30,10 @@ struct Args {
     /// costs more than the misses it prevents.
     #[arg(long)]
     no_hash: bool,
+    /// Sync once and exit. For scripts and cron: populate the dest from
+    /// current state, then leave instead of watching.
+    #[arg(long)]
+    once: bool,
 }
 
 fn main() {
@@ -97,6 +104,9 @@ fn mirror_file(args: &Args) {
     if args.source.exists() && dst_state() != prev {
         let _ = std::fs::copy(&args.source, &dst);
     }
+    if args.once {
+        return;
+    }
     loop {
         thread::sleep(Duration::from_millis(args.interval));
         if !args.source.exists() {
@@ -138,6 +148,9 @@ fn mirror_tree(args: &Args) {
     // --delete: wiping a non-empty dest on first run would be destructive,
     // deletions flow only through the live loop).
     initial_sync(args, capture);
+    if args.once {
+        return;
+    }
     let mut prev = capture(&args.source, &args.excludes);
     loop {
         thread::sleep(Duration::from_millis(args.interval));
