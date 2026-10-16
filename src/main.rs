@@ -1,7 +1,9 @@
 use std::{path::PathBuf, thread, time::Duration};
 
 use clap::Parser;
-use fstrace::{Event, diff, snapshot, snapshot_hashed};
+use fstrace::{
+    Event, FileState, diff, fhash, fsize, matches_exclude, mtime, snapshot, snapshot_hashed,
+};
 
 /// Mirror a live tree elsewhere: poll the source, copy what changed.
 #[derive(Parser, Debug)]
@@ -57,8 +59,6 @@ fn main() {
 // guarantees as tree mode (hashed by default, append-only unless
 // --delete), none of the walking.
 fn mirror_file(args: &Args) {
-    use fstrace::{FileState, fhash, fsize, matches_exclude, mtime};
-
     let name = args
         .source
         .file_name()
