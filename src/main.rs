@@ -7,9 +7,10 @@ use fstrace::{Event, diff, snapshot, snapshot_hashed};
 #[derive(Parser, Debug)]
 #[command(name = "fsmirror", about = "Mirror a live tree, source-only.")]
 struct Args {
-    /// Directory to watch.
+    /// File or directory to watch.
     source: PathBuf,
-    /// Directory to mirror into.
+    /// Mirror target: directory for directory sources; directory or file
+    /// path for file sources (existing directory wins, like `cp`).
     dest: PathBuf,
     /// Exclude a file or folder (repeatable, `*`/`?` patterns allowed).
     #[arg(long = "exclude")]
@@ -31,13 +32,94 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
+    if args.source.is_file() {
+        mirror_file(&args);
+        return;
+    }
     if !args.source.is_dir() {
         eprintln!(
-            "error: source is not a directory: {}",
+            "error: source is not a file or directory: {}",
             args.source.display()
         );
         std::process::exit(1);
     }
+    mirror_tree(&args);
+}
+
+// Single file mode: track one FileState, copy on any change. Same
+// guarantees as tree mode (hashed by default, append-only unless
+// --delete), none of the walking.
+fn mirror_file(args: &Args) {
+    use fstrace::{FileState, fhash, fsize, matches_exclude, mtime};
+
+    let name = args
+        .source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    if args
+        .excludes
+        .iter()
+        .any(|e| matches_exclude(&args.source.to_string_lossy(), name, e))
+    {
+        eprintln!(
+            "error: source excluded by --exclude: {}",
+            args.source.display()
+        );
+        std::process::exit(1);
+    }
+
+    // cp rule: existing directory wins, otherwise dest is the file path.
+    let dst = if args.dest.is_dir() {
+        args.dest.join(name)
+    } else {
+        args.dest.clone()
+    };
+    if let Some(parent) = dst.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("error: cannot create dest {}: {e}", parent.display());
+        std::process::exit(1);
+    }
+
+    let state = |hash: bool| FileState {
+        modified: mtime(&args.source),
+        size: fsize(&args.source),
+        hash: if hash { fhash(&args.source) } else { None },
+    };
+    let dst_state = || FileState {
+        modified: mtime(&dst),
+        size: fsize(&dst),
+        hash: if !args.no_hash { fhash(&dst) } else { None },
+    };
+    let mut prev = state(!args.no_hash);
+    // Startup sync, same as tree mode: copy when missing or differing.
+    if args.source.exists() && dst_state() != prev {
+        let _ = std::fs::copy(&args.source, &dst);
+    }
+    loop {
+        thread::sleep(Duration::from_millis(args.interval));
+        if !args.source.exists() {
+            if args.delete {
+                let _ = std::fs::remove_file(&dst);
+            }
+            prev = state(!args.no_hash);
+            continue;
+        }
+        let curr = state(!args.no_hash);
+        if curr != prev {
+            if let Some(parent) = dst.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::copy(&args.source, &dst) {
+                eprintln!("error: copy {}: {e}", args.source.display());
+            }
+            prev = curr;
+        }
+    }
+}
+
+fn mirror_tree(args: &Args) {
     if let Err(e) = std::fs::create_dir_all(&args.dest) {
         eprintln!("error: cannot create dest {}: {e}", args.dest.display());
         std::process::exit(1);
@@ -55,13 +137,13 @@ fn main() {
     // Copies missing or differing files; never deletes (even with
     // --delete: wiping a non-empty dest on first run would be destructive,
     // deletions flow only through the live loop).
-    initial_sync(&args, capture);
+    initial_sync(args, capture);
     let mut prev = capture(&args.source, &args.excludes);
     loop {
         thread::sleep(Duration::from_millis(args.interval));
         let curr = capture(&args.source, &args.excludes);
         for event in diff(&prev, &curr) {
-            apply(&args, &event);
+            apply(args, &event);
         }
         prev = curr;
     }
