@@ -5,12 +5,30 @@ use {
     },
     std::{
         collections::HashMap,
-        fs,
+        fs, io,
         path::{Path, PathBuf},
         process, thread,
         time::Duration,
     },
 };
+
+// fs::copy opens the destination for writing, so it fails with EACCES when a
+// previous copy left a read-only file behind. Git stores objects and packs as
+// 0444, which makes those files impossible to update or repair once copied.
+// Clear the read-only bit first; fs::copy restores the source mode afterwards.
+// set_readonly(false) briefly opens write for all, which is why clippy flags
+// it; the mode is restored by the copy that follows.
+#[allow(clippy::permissions_set_readonly_false)]
+fn copy_file(src: &Path, dst: &Path) -> io::Result<u64> {
+    if let Ok(meta) = fs::metadata(dst) {
+        let mut perms = meta.permissions();
+        if perms.readonly() {
+            perms.set_readonly(false);
+            let _ = fs::set_permissions(dst, perms);
+        }
+    }
+    fs::copy(src, dst)
+}
 
 /// Mirror a live tree elsewhere: poll the source, copy what changed.
 #[derive(Parser, Debug)]
@@ -111,7 +129,7 @@ fn mirror_file(args: &Args) {
     let mut prev = state(!args.no_hash);
     // Startup mirror, same as tree mode: copy when missing or differing.
     if args.source.exists() && dst_state() != prev {
-        let _ = fs::copy(&args.source, &dst);
+        let _ = copy_file(&args.source, &dst);
     }
     if args.once {
         return;
@@ -130,7 +148,7 @@ fn mirror_file(args: &Args) {
             if let Some(parent) = dst.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            if let Err(e) = fs::copy(&args.source, &dst) {
+            if let Err(e) = copy_file(&args.source, &dst) {
                 eprintln!("error: copy {}: {e}", args.source.display());
             }
             prev = curr;
@@ -193,8 +211,9 @@ fn initial_mirror(
             if let Some(parent) = dst.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            if fs::copy(path, &dst).is_ok() {
-                copied += 1;
+            match copy_file(Path::new(path), &dst) {
+                Ok(_) => copied += 1,
+                Err(e) => eprintln!("error: copy {path}: {e}"),
             }
         }
     }
@@ -221,7 +240,7 @@ fn apply(args: &Args, event: &Event) {
             if let Some(parent) = dst.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            if let Err(e) = fs::copy(&src, &dst) {
+            if let Err(e) = copy_file(&src, &dst) {
                 eprintln!("error: copy {}: {e}", src.display());
             }
         }
