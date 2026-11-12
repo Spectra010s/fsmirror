@@ -1,7 +1,8 @@
 use {
     clap::Parser,
     fstrace::{
-        Event, FileState, diff, fhash, fsize, matches_exclude, mtime, snapshot, snapshot_hashed,
+        EntryKind, Event, FileState, diff, fhash, fsize, matches_exclude, mtime, snapshot,
+        snapshot_hashed,
     },
     std::{
         collections::HashMap,
@@ -11,6 +12,12 @@ use {
         time::Duration,
     },
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+
+#[cfg(windows)]
+use std::os::windows::fs::{symlink_dir, symlink_file};
 
 // fs::copy opens the destination for writing, so it fails with EACCES when a
 // previous copy left a read-only file behind. Git stores objects and packs as
@@ -28,6 +35,109 @@ fn copy_file(src: &Path, dst: &Path) -> io::Result<u64> {
         }
     }
     fs::copy(src, dst)
+}
+
+// State for a regular file, matching fstrace's field layout so source
+// and dest states compare directly.
+fn file_state(path: &Path, hash: bool) -> FileState {
+    FileState {
+        modified: mtime(path),
+        size: fsize(path),
+        hash: if hash { fhash(path) } else { None },
+        kind: EntryKind::File,
+        target: None,
+    }
+}
+
+// State for a symlink. mtime and size come from the target, as in
+// fstrace; the link itself is identified by kind and target.
+fn link_state(path: &Path) -> FileState {
+    FileState {
+        modified: mtime(path),
+        size: fsize(path),
+        hash: None,
+        kind: EntryKind::Symlink,
+        target: fs::read_link(path)
+            .ok()
+            .map(|t| t.to_string_lossy().into_owned()),
+    }
+}
+
+// Classify with symlink_metadata so a link stays a link. A missing path
+// falls back to an empty file state; callers only act when it exists.
+fn entry_state(path: &Path, hash: bool) -> FileState {
+    if is_symlink(path) {
+        link_state(path)
+    } else {
+        file_state(path, hash)
+    }
+}
+
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+// Links compare by kind and target alone: mtime and size come from the
+// target, and a relative target resolves differently at the dest, so
+// comparing those would recreate an identical link every run.
+fn same_entry(a: &FileState, b: &FileState) -> bool {
+    if a.kind == EntryKind::Symlink || b.kind == EntryKind::Symlink {
+        return a.kind == b.kind && a.target == b.target;
+    }
+    a == b
+}
+
+// Remove whatever sits at dst without following links, because symlink()
+// will not replace an existing path. A link or file unlinks; a real
+// directory has to go recursively before a link can take its place.
+fn remove_existing(dst: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(dst) {
+        Ok(meta) if meta.file_type().is_dir() => fs::remove_dir_all(dst),
+        Ok(_) => fs::remove_file(dst),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(unix)]
+fn make_symlink(target: &str, _src: &Path, dst: &Path) -> io::Result<()> {
+    symlink(target, dst)
+}
+
+// Windows links carry their type, which a dangling target cannot reveal;
+// the source side decides, defaulting to a file link.
+#[cfg(windows)]
+fn make_symlink(target: &str, src: &Path, dst: &Path) -> io::Result<()> {
+    let is_dir = fs::metadata(src).map(|m| m.is_dir()).unwrap_or(false);
+    if is_dir {
+        symlink_dir(target, dst)
+    } else {
+        symlink_file(target, dst)
+    }
+}
+
+// Bring one dest entry in line with a source state. Links are recreated
+// with their recorded target, never followed, unless --skip-links says
+// leave them alone.
+fn sync_entry(args: &Args, src: &Path, dst: &Path, state: &FileState) -> io::Result<()> {
+    if state.kind == EntryKind::Symlink {
+        if args.skip_links {
+            return Ok(());
+        }
+        let target = state.target.as_deref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "symlink target unreadable")
+        })?;
+        remove_existing(dst)?;
+        return make_symlink(target, src, dst);
+    }
+    // A stale link at the dest would make fs::copy write through it into
+    // whatever it points at, so unlink it first.
+    if is_symlink(dst) {
+        remove_existing(dst)?;
+    }
+    copy_file(src, dst).map(|_| ())
 }
 
 /// Mirror a live tree elsewhere: poll the source, copy what changed.
@@ -51,6 +161,10 @@ struct Args {
     /// Mirror deletions too. Without this, the dest only ever gains files.
     #[arg(long)]
     delete: bool,
+    /// Leave symlinks untouched at the destination.
+    // Without this, source links are recreated as links, never followed.
+    #[arg(long)]
+    skip_links: bool,
     /// Skip content fingerprinting.
     // Hashed snapshots are the default because a mirror that silently
     // misses rewrites is worse than none; skip only for giant trees
@@ -75,22 +189,23 @@ fn main() {
         process::exit(1);
     }
 
-    if args.source.is_file() {
-        mirror_file(&args);
-        return;
+    // symlink_metadata: a source link is mirrored as a link, not as
+    // whatever it happens to point at.
+    match fs::symlink_metadata(&args.source) {
+        Ok(meta) if meta.file_type().is_symlink() || meta.is_file() => mirror_file(&args),
+        Ok(meta) if meta.is_dir() => mirror_tree(&args),
+        _ => {
+            eprintln!(
+                "error: source is not a file or directory: {}",
+                args.source.display()
+            );
+            process::exit(1);
+        }
     }
-    if !args.source.is_dir() {
-        eprintln!(
-            "error: source is not a file or directory: {}",
-            args.source.display()
-        );
-        process::exit(1);
-    }
-    mirror_tree(&args);
 }
 
-// Single file mode: track one FileState, copy on any change. Same
-// guarantees as tree mode (hashed by default, append-only unless
+// Single file mode: track one source entry, recreate it on any change.
+// Same guarantees as tree mode (hashed by default, append-only unless
 // --delete), none of the walking.
 fn mirror_file(args: &Args) {
     let name = args
@@ -123,40 +238,38 @@ fn mirror_file(args: &Args) {
         process::exit(1);
     }
 
-    let state = |hash: bool| FileState {
-        modified: mtime(&args.source),
-        size: fsize(&args.source),
-        hash: if hash { fhash(&args.source) } else { None },
-    };
-    let dst_state = || FileState {
-        modified: mtime(&dst),
-        size: fsize(&dst),
-        hash: if !args.no_hash { fhash(&dst) } else { None },
-    };
-    let mut prev = state(!args.no_hash);
-    // Startup mirror, same as tree mode: copy when missing or differing.
-    if args.source.exists() && dst_state() != prev {
-        let _ = copy_file(&args.source, &dst);
+    let src_state = || entry_state(&args.source, !args.no_hash);
+    let dst_state = || entry_state(&dst, !args.no_hash);
+    let mut prev = src_state();
+    // Startup mirror, same as tree mode: sync when the source exists and
+    // the dest differs.
+    if fs::symlink_metadata(&args.source).is_ok()
+        && !same_entry(&dst_state(), &prev)
+        && let Err(e) = sync_entry(args, &args.source, &dst, &prev)
+    {
+        eprintln!("error: mirror {}: {e}", args.source.display());
     }
     if args.once {
         return;
     }
     loop {
         thread::sleep(Duration::from_millis(args.interval));
-        if !args.source.exists() {
-            if args.delete {
-                let _ = fs::remove_file(&dst);
+        // Dangling links still exist: symlink_metadata, not exists().
+        if fs::symlink_metadata(&args.source).is_err() {
+            // --skip-links leaves the dest link for a deleted source link.
+            if args.delete && !(args.skip_links && prev.kind == EntryKind::Symlink) {
+                let _ = remove_existing(&dst);
             }
-            prev = state(!args.no_hash);
+            prev = src_state();
             continue;
         }
-        let curr = state(!args.no_hash);
-        if curr != prev {
+        let curr = src_state();
+        if !same_entry(&curr, &prev) {
             if let Some(parent) = dst.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            if let Err(e) = copy_file(&args.source, &dst) {
-                eprintln!("error: copy {}: {e}", args.source.display());
+            if let Err(e) = sync_entry(args, &args.source, &dst, &curr) {
+                eprintln!("error: mirror {}: {e}", args.source.display());
             }
             prev = curr;
         }
@@ -190,7 +303,7 @@ fn mirror_tree(args: &Args) {
         thread::sleep(Duration::from_millis(args.interval));
         let curr = capture(&args.source, &args.excludes);
         for event in diff(&prev, &curr) {
-            apply(args, &event);
+            apply(args, &event, &prev, &curr);
         }
         prev = curr;
     }
@@ -200,9 +313,13 @@ fn mirror_tree(args: &Args) {
 // dest the same cp rule the modes use, then compares canonical paths
 // (lexical fallback when paths don't exist yet).
 fn guard_paths(source: &Path, dest: &Path) -> Result<(), String> {
-    // Effective dest: for file sources an existing directory wins (cp
-    // rule); directory sources mirror the dir itself, never joined.
-    let eff = if !source.is_dir() && dest.is_dir() {
+    // Effective dest: for non-directory sources an existing directory
+    // wins (cp rule); directory sources mirror the dir itself, never
+    // joined. symlink_metadata keeps a source link out of the dir case.
+    let src_is_dir = fs::symlink_metadata(source)
+        .map(|m| m.is_dir())
+        .unwrap_or(false);
+    let eff = if !src_is_dir && dest.is_dir() {
         match source.file_name() {
             Some(name) => dest.join(name),
             None => dest.to_path_buf(),
@@ -237,32 +354,33 @@ fn guard_paths(source: &Path, dest: &Path) -> Result<(), String> {
     }
     Ok(())
 }
-// Bring dest up to date before the watch loop starts: copy every source
-// file missing in dest or differing from it. Same-State comparison as
+// Bring dest up to date before the watch loop starts: mirror every
+// source entry missing in dest or differing from it. Same comparison as
 // the live loop, so no second opinion logic to drift.
-fn initial_mirror(
-    args: &Args,
-    capture: fn(&Path, &[String]) -> HashMap<String, fstrace::FileState>,
-) {
+fn initial_mirror(args: &Args, capture: fn(&Path, &[String]) -> HashMap<String, FileState>) {
     let src_map = capture(&args.source, &args.excludes);
     let dst_map = capture(&args.dest, &args.excludes);
     let mut copied = 0u32;
     for (path, state) in &src_map {
+        if args.skip_links && state.kind == EntryKind::Symlink {
+            continue;
+        }
         let rel = match PathBuf::from(path).strip_prefix(&args.source) {
             Ok(r) => r.to_path_buf(),
             Err(_) => continue,
         };
         // Dest keys are absolute too; rebuild the dest-side key the same way.
         let dst_key = args.dest.join(&rel).to_string_lossy().into_owned();
-        if dst_map.get(&dst_key) != Some(state) {
-            let dst = args.dest.join(&rel);
-            if let Some(parent) = dst.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            match copy_file(Path::new(path), &dst) {
-                Ok(_) => copied += 1,
-                Err(e) => eprintln!("error: copy {path}: {e}"),
-            }
+        if dst_map.get(&dst_key).is_some_and(|d| same_entry(d, state)) {
+            continue;
+        }
+        let dst = args.dest.join(&rel);
+        if let Some(parent) = dst.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        match sync_entry(args, Path::new(path), &dst, state) {
+            Ok(()) => copied += 1,
+            Err(e) => eprintln!("error: mirror {path}: {e}"),
         }
     }
     if copied > 0 {
@@ -270,9 +388,14 @@ fn initial_mirror(
     }
 }
 
-// Copy one event into the dest tree. Paths are stored absolute in the
+// Mirror one event into the dest tree. Paths are stored absolute in the
 // snapshot, so strip the source prefix to get the dest-relative path.
-fn apply(args: &Args, event: &Event) {
+fn apply(
+    args: &Args,
+    event: &Event,
+    prev: &HashMap<String, FileState>,
+    curr: &HashMap<String, FileState>,
+) {
     let path = match event {
         Event::Created { path } | Event::Modified { path } | Event::Deleted { path } => path,
     };
@@ -285,19 +408,32 @@ fn apply(args: &Args, event: &Event) {
 
     match event {
         Event::Created { .. } | Event::Modified { .. } => {
+            // The poll already classified the entry; a re-stat here could
+            // race a second change and lose the link target.
+            let Some(state) = curr.get(path) else {
+                return;
+            };
+            if args.skip_links && state.kind == EntryKind::Symlink {
+                return;
+            }
             if let Some(parent) = dst.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            if let Err(e) = copy_file(&src, &dst) {
-                eprintln!("error: copy {}: {e}", src.display());
+            if let Err(e) = sync_entry(args, &src, &dst, state) {
+                eprintln!("error: mirror {}: {e}", src.display());
             }
         }
         Event::Deleted { .. } => {
             // Append-only unless --delete: the dest never loses files
             // by default, so a bad poll cannot wipe the backup.
-            if args.delete {
-                let _ = fs::remove_file(&dst);
+            if !args.delete {
+                return;
             }
+            // --skip-links leaves a deleted source link's dest alone.
+            if args.skip_links && prev.get(path).is_some_and(|s| s.kind == EntryKind::Symlink) {
+                return;
+            }
+            let _ = remove_existing(&dst);
         }
     }
 }

@@ -10,6 +10,7 @@ fsmirror is a command-line utility written in Rust for mirroring files and folde
 - **Content hashing:** detects content changes even when file size and modification time stay the same.
 - **Exclusions:** skip files and folders with repeatable patterns.
 - **Optional deletion mirroring:** retain deleted source files in the destination by default, or enable `--delete`.
+- **Symlink preservation:** recreates links with their recorded targets, including broken ones, without following them; `--skip-links` ignores links entirely.
 
 Built on [fstrace](https://crates.io/crates/fstrace).
 
@@ -69,6 +70,18 @@ Add `--once` for a single run:
 fsmirror "$PWD/config.toml" "$PWD/backup/config.toml" --once
 ```
 
+A symlink source is mirrored as a symlink, not as the file it points to.
+
+### Symlinks
+
+Symlinks are recreated with the same target, never followed. This includes relative targets, directory links, and links that point at nothing. Targets are stored exactly as written, so a relative link may resolve differently at the destination, while an absolute link still points at its original location.
+
+Use `--skip-links` to ignore links entirely: they are not created, updated, or removed in the destination.
+
+```sh
+fsmirror "$PWD/source" "$PWD/mirror" --skip-links
+```
+
 ### Exclude files and folders
 
 Repeat `--exclude` for multiple patterns. Patterns support `*` and `?`; quote them to prevent shell expansion.
@@ -116,16 +129,17 @@ Without hashing, changes that preserve both file size and modification time may 
 | `--exclude <PATTERN>` | Exclude a file or folder; repeatable | None |
 | `--interval <MS>` | Time between polls in milliseconds | `1000` |
 | `--delete` | Propagate source-file deletions detected while running | Disabled |
+| `--skip-links` | Do not create, update, or remove symlinks at the destination | Disabled |
 | `--no-hash` | Disable content hashing | Disabled |
 | `-h`, `--help` | Show help | |
 
 ## How it works
 
-1. Compare the source and destination, mirroring missing or differing source files.
+1. Compare the source and destination, mirroring missing or differing source entries (files and symlinks).
 2. Exit if `--once` is enabled.
 3. Record the source state.
 4. Wait for the polling interval, then compare the new source state with the previous one.
-5. Mirror created or modified files, and optionally remove deleted files from the destination.
+5. Mirror created or modified entries, and optionally remove deleted ones from the destination.
 6. Repeat.
 
 Destination changes are not mirrored back to the source. Existing destination files may be overwritten by source files.
