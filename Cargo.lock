@@ -108,9 +108,9 @@ dependencies = [
 
 [[package]]
 name = "fstrace"
-version = "1.2.0"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a5997db7b4a8ff5cc167d1d2648cb831cb2669cf0bb74527f64761b3b15bd76"
+checksum = "be43d03de65185213c99a7bca78f98ba9ad41ad4d0c7eea94d07fde7a49bf09f"
 
 [[package]]
 name = "heck"
