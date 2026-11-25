@@ -3,10 +3,19 @@ name = "fsmirror"
 version = "0.1.0"
 edition = "2024"
 description = "A command-line utility for mirroring files and folders."
+authors = ["Adeloye Adetayo"]
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/Spectra010s/fsmirror"
-include = ["Cargo.toml", "Cargo.lock", "src/**", "tests/**", "README.md", "LICENSE"]
+include = ["Cargo.toml", "Cargo.lock", "src/**", "tests/**", "README.md", "CONTRIBUTING.md", "LICENSE"]
+
+[package.metadata.wix]
+product-name = "fsmirror"
+upgrade-guid = "EDEAB169-8454-4E62-BE0F-BD92F65ADC5B"
+path-guid = "85CB7578-D9DD-4A07-A6A9-B2561CCBC2F4"
+license = true
+license-file = "./LICENSE"
+eula = false
 
 [dependencies]
 fstrace = "1.3"
