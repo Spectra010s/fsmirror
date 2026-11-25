@@ -5,7 +5,13 @@ edition = "2024"
 description = "A command-line utility for mirroring files and folders."
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/Spectra010s/fsmirror"
 
 [dependencies]
 fstrace = "1.3"
 clap = { version = "4", features = ["derive"] }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
