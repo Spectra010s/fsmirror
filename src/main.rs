@@ -27,6 +27,7 @@ use std::os::windows::fs::{symlink_dir, symlink_file};
 // it; the mode is restored by the copy that follows.
 #[allow(clippy::permissions_set_readonly_false)]
 fn copy_file(src: &Path, dst: &Path) -> io::Result<u64> {
+    let source_modified = fs::metadata(src).and_then(|meta| meta.modified()).ok();
     if let Ok(meta) = fs::metadata(dst) {
         let mut perms = meta.permissions();
         if perms.readonly() {
@@ -34,7 +35,15 @@ fn copy_file(src: &Path, dst: &Path) -> io::Result<u64> {
             let _ = fs::set_permissions(dst, perms);
         }
     }
-    fs::copy(src, dst)
+    let copied = fs::copy(src, dst)?;
+    // fs::copy preserves permissions but not mtime. Match the source so a
+    // second --once run can compare snapshots without copying again.
+    if let Some(modified) = source_modified
+        && let Ok(file) = fs::File::open(dst)
+    {
+        let _ = file.set_times(fs::FileTimes::new().set_modified(modified));
+    }
+    Ok(copied)
 }
 
 // Permission bits from symlink_metadata, matching fstrace's state so
