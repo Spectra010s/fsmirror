@@ -14,7 +14,7 @@ use {
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 
 #[cfg(windows)]
 use std::os::windows::fs::{symlink_dir, symlink_file};
@@ -37,6 +37,30 @@ fn copy_file(src: &Path, dst: &Path) -> io::Result<u64> {
     fs::copy(src, dst)
 }
 
+// Permission bits from symlink_metadata, matching fstrace's state so
+// source and dest compare directly. None outside Unix.
+#[cfg(unix)]
+fn mode_of(path: &Path) -> Option<u32> {
+    fs::symlink_metadata(path)
+        .ok()
+        .map(|m| m.permissions().mode())
+}
+
+#[cfg(not(unix))]
+fn mode_of(_path: &Path) -> Option<u32> {
+    None
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: Option<u32>) {
+    if let Some(mode) = mode {
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
+    }
+}
+
+#[cfg(not(unix))]
+fn set_mode(_path: &Path, _mode: Option<u32>) {}
+
 // State for a regular file, matching fstrace's field layout so source
 // and dest states compare directly.
 fn file_state(path: &Path, hash: bool) -> FileState {
@@ -46,6 +70,7 @@ fn file_state(path: &Path, hash: bool) -> FileState {
         hash: if hash { fhash(path) } else { None },
         kind: EntryKind::File,
         target: None,
+        mode: mode_of(path),
     }
 }
 
@@ -60,6 +85,20 @@ fn link_state(path: &Path) -> FileState {
         target: fs::read_link(path)
             .ok()
             .map(|t| t.to_string_lossy().into_owned()),
+        mode: mode_of(path),
+    }
+}
+
+// State for a directory. fstrace tracks presence and mode only, leaving
+// mtime and size empty so child changes do not modify the parent.
+fn dir_state(path: &Path) -> FileState {
+    FileState {
+        modified: None,
+        size: 0,
+        hash: None,
+        kind: EntryKind::Dir,
+        target: None,
+        mode: mode_of(path),
     }
 }
 
@@ -68,6 +107,11 @@ fn link_state(path: &Path) -> FileState {
 fn entry_state(path: &Path, hash: bool) -> FileState {
     if is_symlink(path) {
         link_state(path)
+    } else if fs::symlink_metadata(path)
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
+    {
+        dir_state(path)
     } else {
         file_state(path, hash)
     }
@@ -77,6 +121,23 @@ fn is_symlink(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|m| m.file_type().is_symlink())
         .unwrap_or(false)
+}
+
+// Make sure dst's parent is a real directory. A file sits where a
+// directory should be when a file was swapped for a directory at the
+// same path, so clear it before creating the tree. Symlinks are left
+// alone: fs::metadata follows them, so a symlink to a directory still
+// receives writes.
+fn ensure_parent(dst: &Path) -> io::Result<()> {
+    let Some(parent) = dst.parent() else {
+        return Ok(());
+    };
+    if let Ok(meta) = fs::metadata(parent)
+        && !meta.is_dir()
+    {
+        remove_existing(parent)?;
+    }
+    fs::create_dir_all(parent)
 }
 
 // Links compare by kind and target alone: mtime and size come from the
@@ -122,6 +183,14 @@ fn make_symlink(target: &str, src: &Path, dst: &Path) -> io::Result<()> {
 // with their recorded target, never followed, unless --skip-links says
 // leave them alone.
 fn sync_entry(args: &Args, src: &Path, dst: &Path, state: &FileState) -> io::Result<()> {
+    if state.kind == EntryKind::Dir {
+        if let Ok(meta) = fs::symlink_metadata(dst)
+            && !meta.file_type().is_dir()
+        {
+            remove_existing(dst)?;
+        }
+        return fs::create_dir_all(dst);
+    }
     if state.kind == EntryKind::Symlink {
         if args.skip_links {
             return Ok(());
@@ -132,9 +201,12 @@ fn sync_entry(args: &Args, src: &Path, dst: &Path, state: &FileState) -> io::Res
         remove_existing(dst)?;
         return make_symlink(target, src, dst);
     }
-    // A stale link at the dest would make fs::copy write through it into
-    // whatever it points at, so unlink it first.
-    if is_symlink(dst) {
+    // A stale symlink at the dest would make fs::copy write through it
+    // into whatever it points at, and a stale directory blocks the copy
+    // outright, so clear either before writing.
+    if let Ok(meta) = fs::symlink_metadata(dst)
+        && (meta.file_type().is_symlink() || meta.file_type().is_dir())
+    {
         remove_existing(dst)?;
     }
     copy_file(src, dst).map(|_| ())
@@ -302,9 +374,15 @@ fn mirror_tree(args: &Args) {
     loop {
         thread::sleep(Duration::from_millis(args.interval));
         let curr = capture(&args.source, &args.excludes);
-        for event in diff(&prev, &curr) {
-            apply(args, &event, &prev, &curr);
+        let mut events = diff(&prev, &curr);
+        // Parents before children: a directory must exist before its
+        // contents, and a file swapped for a directory must be replaced
+        // before anything is mirrored into it.
+        events.sort_by_key(|e| Path::new(e.path()).components().count());
+        for event in &events {
+            apply(args, event, &prev, &curr);
         }
+        apply_dir_modes(args, &events, &curr);
         prev = curr;
     }
 }
@@ -361,7 +439,12 @@ fn initial_mirror(args: &Args, capture: fn(&Path, &[String]) -> HashMap<String, 
     let src_map = capture(&args.source, &args.excludes);
     let dst_map = capture(&args.dest, &args.excludes);
     let mut copied = 0u32;
-    for (path, state) in &src_map {
+    let mut entries: Vec<(&String, &FileState)> = src_map.iter().collect();
+    // Parents before children: a directory has to exist before its
+    // contents, and a file swapped for a directory must be replaced
+    // before anything is mirrored into it.
+    entries.sort_by_key(|(path, _)| Path::new(path.as_str()).components().count());
+    for (path, state) in entries {
         if args.skip_links && state.kind == EntryKind::Symlink {
             continue;
         }
@@ -375,16 +458,44 @@ fn initial_mirror(args: &Args, capture: fn(&Path, &[String]) -> HashMap<String, 
             continue;
         }
         let dst = args.dest.join(&rel);
-        if let Some(parent) = dst.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
+        let _ = ensure_parent(&dst);
         match sync_entry(args, Path::new(path), &dst, state) {
             Ok(()) => copied += 1,
             Err(e) => eprintln!("error: mirror {path}: {e}"),
         }
     }
+    // Directory modes last: a read-only directory must not be sealed
+    // before its children have been mirrored into it.
+    for (path, state) in &src_map {
+        if state.kind != EntryKind::Dir {
+            continue;
+        }
+        let Ok(rel) = Path::new(path).strip_prefix(&args.source) else {
+            continue;
+        };
+        set_mode(&args.dest.join(rel), state.mode);
+    }
     if copied > 0 {
         eprintln!("mirrored: {copied} file(s)");
+    }
+}
+
+// Directory modes cannot be applied while events are processed: a
+// read-only directory would block its own children. Wait until every
+// event in the poll is mirrored, then apply them.
+fn apply_dir_modes(args: &Args, events: &[Event], curr: &HashMap<String, FileState>) {
+    for event in events {
+        let path = event.path();
+        let Some(state) = curr.get(path) else {
+            continue;
+        };
+        if state.kind != EntryKind::Dir {
+            continue;
+        }
+        let Ok(rel) = Path::new(path).strip_prefix(&args.source) else {
+            continue;
+        };
+        set_mode(&args.dest.join(rel), state.mode);
     }
 }
 
@@ -416,9 +527,7 @@ fn apply(
             if args.skip_links && state.kind == EntryKind::Symlink {
                 return;
             }
-            if let Some(parent) = dst.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
+            let _ = ensure_parent(&dst);
             if let Err(e) = sync_entry(args, &src, &dst, state) {
                 eprintln!("error: mirror {}: {e}", src.display());
             }
