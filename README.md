@@ -16,7 +16,21 @@ Built on [fstrace](https://crates.io/crates/fstrace).
 
 ## Installation
 
-Download a prebuilt binary for your platform from the [GitHub releases](https://github.com/Spectra010s/fsmirror/releases). Extract the archive and put `fsmirror` (or `fsmirror.exe` on Windows) on your `PATH`.
+**Linux / macOS / Android (Termux):**
+
+```sh
+curl -fsSL https://github.com/Spectra010s/fsmirror/raw/main/install.sh | sh
+```
+
+**Windows:**
+
+Download the `fsmirror-x86_64-pc-windows-msvc.msi` installer from the [latest release](https://github.com/Spectra010s/fsmirror/releases/latest). You can also install with PowerShell:
+
+```ps1
+iex (irm https://github.com/Spectra010s/fsmirror/raw/main/install.ps1)
+```
+
+Platform archives are also available on the [GitHub releases](https://github.com/Spectra010s/fsmirror/releases) page.
 
 To install from source with Rust and Cargo:
 
@@ -137,7 +151,7 @@ Without hashing, changes that preserve both file size and modification time may 
 
 ## How it works
 
-1. Compare the source and destination, mirroring missing or differing source entries (files and symlinks).
+1. Compare the source and destination, mirroring missing or differing source entries (files, directories, and symlinks).
 2. Exit if `--once` is enabled.
 3. Record the source state.
 4. Wait for the polling interval, then compare the new source state with the previous one.
@@ -148,7 +162,11 @@ Destination changes are not mirrored back to the source. Existing destination fi
 
 fsmirror keeps a current copy; it does not keep historical file versions.
 
-## Author
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Maintainer
 
 Adeloye Adetayo ([Spectra010s](https://spectra010s.com))
 
