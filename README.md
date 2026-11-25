@@ -16,7 +16,9 @@ Built on [fstrace](https://crates.io/crates/fstrace).
 
 ## Installation
 
-Install from GitHub with Rust and Cargo:
+Download a prebuilt binary for your platform from the [GitHub releases](https://github.com/Spectra010s/fsmirror/releases). Extract the archive and put `fsmirror` (or `fsmirror.exe` on Windows) on your `PATH`.
+
+To install from source with Rust and Cargo:
 
 ```sh
 cargo install --git https://github.com/Spectra010s/fsmirror.git
