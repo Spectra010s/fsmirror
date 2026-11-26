@@ -225,9 +225,14 @@ fn sync_entry(args: &Args, src: &Path, dst: &Path, state: &FileState) -> io::Res
 #[derive(Parser, Debug)]
 #[command(
     name = "fsmirror",
-    about = "A command-line utility for mirroring files and folders."
+    version,
+    about = "A command-line utility for mirroring files and folders.",
+    disable_version_flag = true
 )]
 struct Args {
+    /// Print version information.
+    #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
+    version: Option<bool>,
     /// File or directory to watch.
     source: PathBuf,
     /// Mirror target: directory for directory sources; directory or file
