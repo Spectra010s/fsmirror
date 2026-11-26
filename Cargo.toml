@@ -7,6 +7,8 @@ authors = ["Adeloye Adetayo"]
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/Spectra010s/fsmirror"
+keywords = ["cli", "filesystem", "mirror", "sync", "tools"]
+categories = ["command-line-utilities", "filesystem"]
 include = ["Cargo.toml", "Cargo.lock", "src/**", "tests/**", "README.md", "CONTRIBUTING.md", "LICENSE"]
 
 [package.metadata.wix]

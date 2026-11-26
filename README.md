@@ -32,7 +32,13 @@ iex (irm https://github.com/Spectra010s/fsmirror/raw/main/install.ps1)
 
 Platform archives are also available on the [GitHub releases](https://github.com/Spectra010s/fsmirror/releases) page.
 
-To install from source with Rust and Cargo:
+**With Cargo:**
+
+```sh
+cargo install fsmirror
+```
+
+To track the latest unreleased code instead:
 
 ```sh
 cargo install --git https://github.com/Spectra010s/fsmirror.git
